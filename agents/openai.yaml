@@ -1,0 +1,8 @@
+interface:
+  display_name: "A股每日研究"
+  short_description: "生成A股观察清单、情绪复盘与风险提示"
+  brand_color: "#2563EB"
+  default_prompt: "Use $a-share-daily-research to prepare today's A股 market watchlist with scenario-based risk notes."
+
+policy:
+  allow_implicit_invocation: true
