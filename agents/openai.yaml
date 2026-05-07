@@ -1,8 +1,8 @@
 interface:
-  display_name: "A股每日研究"
-  short_description: "生成A股观察清单、情绪复盘与风险提示"
+  display_name: "每日A股动态合集"
+  short_description: "汇总A股指数、题材、连板、龙虎榜与风险"
   brand_color: "#2563EB"
-  default_prompt: "Use $a-share-daily-research to prepare today's A股 market watchlist with scenario-based risk notes."
+  default_prompt: "Use $daily-a-share-digest to prepare today's 每日A股动态合集 with market sentiment, hot themes, risk notes, and optional watchlist."
 
 policy:
   allow_implicit_invocation: true

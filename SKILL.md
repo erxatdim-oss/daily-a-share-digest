@@ -1,17 +1,17 @@
 ---
-name: a-share-daily-research
-description: Use when preparing daily A-share market research, China stock watchlists, sector rotation notes, risk-aware stock screening, or scenario-based forecasts for mainland China equities. Triggers for requests about 国内股票, A股, 沪深京股票, 每日荐股, 股票观察清单, 资金流向, 板块轮动, 连板天梯, 龙虎榜, or next-session stock research. This skill must not present personalized investment advice or guaranteed predictions.
+name: daily-a-share-digest
+description: Use when preparing a daily A-share market dynamic digest for mainland China equities: indexes, breadth, volume, hot themes, sector rotation, 连板天梯, 龙虎榜, 资金流向, major announcements, risk notes, and optional watchlists. Triggers for requests about 每日A股动态合集, A股动态, A股复盘, 国内股票, 沪深京股票, 股票观察清单, 板块轮动, or next-session A股 tracking. This skill must not present personalized investment advice or guaranteed predictions.
 ---
 
-# A-Share Daily Research
+# Daily A-Share Dynamic Digest
 
-Use this skill to produce a daily A股 research brief and watchlist. The output is a research aid, not personalized financial advice.
+Use this skill to produce a daily A股 dynamic digest: market temperature, hot themes, sentiment, capital flow, announcements, and optional watchlists. The output is a research aid, not personalized financial advice.
 
 ## Safety Rules
 
 - Do not promise returns, use deterministic language like "必涨", or claim to predict exact prices.
 - Do not tell the user to buy, sell, hold, add leverage, all-in, or trade at any exact price as a directive.
-- Label candidates as "观察标的" or "候选池", not "must-buy recommendations".
+- Label candidates as "观察标的" or "候选池", not "must-buy recommendations". A digest can omit stock candidates entirely when market conditions are poor.
 - Include risk notes, invalidation conditions, and why the idea may fail.
 - If the user asks for personal allocation, portfolio construction, suitability advice, or account-specific trade sizing, explain that this requires a licensed adviser and provide only general education.
 - For current market data, news, rules, or prices, browse or use live data tools before answering.
@@ -64,17 +64,22 @@ The GitHub project `Niceck/hhxg-top-hhxg-python` can be used as a reference for 
    - Market data portals: Eastmoney, Tonghuashun, Sina Finance, Tencent Finance, Wind-like summaries when accessible.
    - News and catalysts: 证券时报, 财联社, 上海证券报, 中国证券报, official policy releases.
    - Optional quantitative data: AkShare or Tushare if available locally; verify freshness before trusting it.
-3. Build market context:
+3. Build the daily A股 dynamic digest:
    - Major index trend: 上证指数, 深证成指, 创业板指, 科创50, 北证50.
    - Breadth: 涨跌家数, 涨停/跌停, 量能 vs recent average.
    - Northbound/ETF/fund flow when available.
    - Sector rotation and policy/event catalysts.
+   - 热门题材: rank strongest themes and whether they are first-day, continuation, or late-stage hype.
+   - 连板天梯: summarize high-board height and whether risk appetite is expanding or contracting.
+   - 龙虎榜/机构/游资 clues: include only if timely and source-backed.
+   - 重要公告/财经快讯: list catalysts that matter for the next session.
+   - 风险温度: identify overheated sectors, rumor-heavy stories, and obvious liquidity traps.
 4. Check current positions when the user provides them:
    - Current price vs cost basis.
    - Key support/resistance and invalidation levels.
    - Strong/base/weak next-session scenarios.
    - Whether new candidates duplicate existing portfolio exposure.
-5. Screen candidates with multiple, independent signals:
+5. Optionally screen watchlist candidates with multiple, independent signals:
    - Liquidity: avoid thinly traded names unless explicitly requested.
    - Momentum: recent relative strength vs index and sector.
    - Volume/price confirmation: breakout, reversal, or consolidation with clear invalidation.
@@ -98,14 +103,16 @@ The GitHub project `Niceck/hhxg-top-hhxg-python` can be used as a reference for 
 Write in Chinese unless the user asks otherwise.
 
 Start with this disclaimer:
-"以下是A股研究观察清单，不构成个性化投资建议。"
+"以下是每日A股动态合集，不构成个性化投资建议。"
 
 Then provide:
 
-1. **市场温度**: date, status, broad index read, breadth, volume, dominant sectors.
-2. **今日主线**: 2-4 sector/catalyst themes with why they matter.
-3. **持仓检查**: only if the user provided positions; include current price, cost line, support, failure line, and next-session scenarios.
-4. **观察清单**: 3-8 stocks max, each with:
+1. **市场温度**: date, status, broad index read, breadth, volume, limit-up/limit-down count, and risk appetite.
+2. **热门题材**: 3-6 themes or industries with rotation status and why they matter.
+3. **连板与情绪**: high-board height, fried-board clues, 龙虎榜/资金 clues when available.
+4. **公告与快讯**: major policy, company, and macro catalysts relevant to A股.
+5. **持仓检查**: only if the user provided positions; include current price, cost line, support, failure line, and next-session scenarios.
+6. **观察清单**: optional, 0-8 stocks max, each with:
    - 股票名称 + 代码
    - 所属行业/概念
    - 最新价, 一手约需资金, and whether it fits the user's stated cash budget
@@ -113,8 +120,8 @@ Then provide:
    - 情景推演: 强/中/弱 path
    - 风险与失效条件
    - 观察级别: 高/中/低, based on evidence quality
-5. **不碰清单**: obvious risks or overheated areas.
-6. **下个交易日跟踪点**: 3-5 concrete signals to verify.
+7. **不碰清单**: obvious risks or overheated areas.
+8. **下个交易日跟踪点**: 3-5 concrete signals to verify.
 
 Keep it concise, source-backed, and timestamped. Link the most important sources when browsing was used.
 
