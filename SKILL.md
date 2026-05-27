@@ -1,11 +1,11 @@
 ---
 name: daily-a-share-digest
-description: Use when preparing a daily A-share market dynamic digest for mainland China equities: indexes, breadth, volume, hot themes, sector rotation, 连板天梯, 龙虎榜, 资金流向, major announcements, risk notes, and optional watchlists. Triggers for requests about 每日A股动态合集, A股动态, A股复盘, 国内股票, 沪深京股票, 股票观察清单, 板块轮动, or next-session A股 tracking. This skill must not present personalized investment advice or guaranteed predictions.
+description: Use when preparing a daily A-share market dynamic digest for mainland China equities: indexes, breadth, volume, hot themes, sector rotation, 连板天梯, 龙虎榜, 资金流向, major announcements, risk notes, optional watchlists, 风扇理论板块轮动, 蜂巢理论资金迁徙, repair/bottom-fishing scans, and position checks. Triggers for 每日A股动态合集, A股动态, A股复盘, 国内股票, 沪深京股票, 股票观察清单, 板块轮动, 修复低吸, 抄底观察, 风扇理论, 蜂巢理论, or next-session A股 tracking. This skill must not present personalized investment advice or guaranteed predictions.
 ---
 
 # Daily A-Share Dynamic Digest
 
-Use this skill to produce a daily A股 dynamic digest: market temperature, hot themes, sentiment, capital flow, announcements, and optional watchlists. The output is a research aid, not personalized financial advice.
+Use this skill to produce a daily A股 dynamic digest: market temperature, hot themes, sentiment, capital flow, announcements, sector-rotation models, and optional watchlists. The output is a research aid, not personalized financial advice.
 
 ## Safety Rules
 
@@ -55,6 +55,26 @@ When available, incorporate A-share short-term sentiment data before ranking can
 
 The GitHub project `Niceck/hhxg-top-hhxg-python` can be used as a reference for market-sentiment categories such as赚钱效应、热门题材、连板天梯、龙虎榜、行业资金、财经快讯、融资融券、交易日历. Treat third-party data as unverified until cross-checked with Eastmoney, Tonghuashun, Sina Finance, exchange announcements, or company filings.
 
+## Rotation Models
+
+Use these models as structured observation frameworks, not prediction engines. For details, load [references/fan-honeycomb-models.md](references/fan-honeycomb-models.md) when the user asks about 风扇理论, 蜂巢理论, 板块周期, 修复低吸, or capital migration.
+
+- **风扇理论**: Treat sectors as fan blades. Classify each blade as 冷却、潜伏、启动、加速、高潮、分歧、退潮、修复 by price structure, turnover, breadth, limit-up feedback, leader/follower behavior, and invalidation lines.
+- **蜂巢理论**: Treat sectors as honeycomb cells and main funds as bees. Use half-year style evidence such as 5d/20d/60d/6m returns, range position, volatility, and volume to judge which cells are crowded, cooling, or attracting test flows.
+- **Repair/bottom-fishing rule**: A candidate is not valid just because it fell. Prefer names that stop falling, reclaim VWAP/均价 or a short moving average, keep sufficient liquidity, and have a clear failure line.
+- **Scenario language only**: Express conclusions as 强/中/弱情景 with confirmation and invalidation signals.
+
+## Bundled Tools
+
+Use bundled scripts when local execution is helpful:
+
+- `scripts/a_share_watch.py`: fetch public quotes and render current price, one-lot cash, position P/L, key lines, and risk state.
+  - Example: `python scripts/a_share_watch.py -p 600487:200:68.82 000758`
+- `scripts/a_share_scan.py`: scan ordinary Shanghai/Shenzhen main-board names from Eastmoney-style public data and rank repair/low-absorption candidates with transparent factors.
+  - Example: `python scripts/a_share_scan.py --pages 8 --top 30`
+- `apps/a_share_visual_app.py`: Streamlit dashboard for Mac/browser use, including holdings, fan-blade rotation, honeycomb flow, and repair scan.
+  - Example: `streamlit run apps/a_share_visual_app.py`
+
 ## Daily Workflow
 
 1. Confirm date, market status, and whether A股 is open. Note if the brief is pre-market, intraday, lunch break, post-close, weekend, or holiday.
@@ -74,6 +94,8 @@ The GitHub project `Niceck/hhxg-top-hhxg-python` can be used as a reference for 
    - 龙虎榜/机构/游资 clues: include only if timely and source-backed.
    - 重要公告/财经快讯: list catalysts that matter for the next session.
    - 风险温度: identify overheated sectors, rumor-heavy stories, and obvious liquidity traps.
+   - 风扇叶片: summarize leading sectors by rotation stage and next confirmation point when sector-cycle analysis is requested.
+   - 蜂巢迁徙: summarize which sectors look crowded, cooling, repairing, or attracting trial capital when medium-term analysis is requested.
 4. Check current positions when the user provides them:
    - Current price vs cost basis.
    - Key support/resistance and invalidation levels.
@@ -109,10 +131,12 @@ Then provide:
 
 1. **市场温度**: date, status, broad index read, breadth, volume, limit-up/limit-down count, and risk appetite.
 2. **热门题材**: 3-6 themes or industries with rotation status and why they matter.
-3. **连板与情绪**: high-board height, fried-board clues, 龙虎榜/资金 clues when available.
-4. **公告与快讯**: major policy, company, and macro catalysts relevant to A股.
-5. **持仓检查**: only if the user provided positions; include current price, cost line, support, failure line, and next-session scenarios.
-6. **观察清单**: optional, 0-8 stocks max, each with:
+3. **风扇叶片**: optional sector-rotation table with stage, representative stocks, capital temperature, and next confirmation point.
+4. **蜂巢迁徙**: optional medium-term capital migration read, especially when the user asks for half-year patterns or next sector rotation.
+5. **连板与情绪**: high-board height, fried-board clues, 龙虎榜/资金 clues when available.
+6. **公告与快讯**: major policy, company, and macro catalysts relevant to A股.
+7. **持仓检查**: only if the user provided positions; include current price, cost line, support, failure line, and next-session scenarios.
+8. **观察清单**: optional, 0-8 stocks max, each with:
    - 股票名称 + 代码
    - 所属行业/概念
    - 最新价, 一手约需资金, and whether it fits the user's stated cash budget
@@ -120,8 +144,8 @@ Then provide:
    - 情景推演: 强/中/弱 path
    - 风险与失效条件
    - 观察级别: 高/中/低, based on evidence quality
-7. **不碰清单**: obvious risks or overheated areas.
-8. **下个交易日跟踪点**: 3-5 concrete signals to verify.
+9. **不碰清单**: obvious risks or overheated areas.
+10. **下个交易日跟踪点**: 3-5 concrete signals to verify.
 
 Keep it concise, source-backed, and timestamped. Link the most important sources when browsing was used.
 
