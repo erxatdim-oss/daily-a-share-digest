@@ -34,7 +34,7 @@ EASTMONEY_KLINE_URL = (
 SINA_INDEX_URL = "https://hq.sinajs.cn/list=sh000001,sz399001,sz399006,sh000688,sz399300"
 
 DEFAULT_CODES = "600487 000758 000733 603678 000636 600522 603601 600396 002491 002241 603005 002456 000988"
-DEFAULT_POSITIONS = "600487 200 68.82\n000758 300 6.893"
+DEFAULT_POSITIONS = "600487 200 68.62\n002491 100 22.05"
 
 SECTORS = {
     "军工电子/电子元件": ["000733", "603678", "000636"],
@@ -1085,7 +1085,7 @@ def main() -> None:
         st.caption(f"已识别 {code_count} 只自选股")
 
         render_sidebar_card("持仓账本", "每行：代码 股数 成本。这里只用于风险线和浮盈亏观察，不会连接券商下单。")
-        positions_text = st.text_area("持仓", DEFAULT_POSITIONS, height=92, label_visibility="collapsed", placeholder="600487 200 68.82\n000758 300 6.893")
+        positions_text = st.text_area("持仓", DEFAULT_POSITIONS, height=92, label_visibility="collapsed", placeholder="600487 200 68.62\n002491 100 22.05")
         pos_count = len(parse_positions(positions_text))
         st.caption(f"已识别 {pos_count} 条持仓")
 
