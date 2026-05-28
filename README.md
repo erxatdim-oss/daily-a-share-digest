@@ -4,6 +4,15 @@ A Codex skill for a **每日A股动态合集**: mainland China A-share market te
 
 This skill is a research aid only. It does not provide personalized investment advice, guaranteed predictions, or buy/sell instructions.
 
+## 中文更新内容（2026-05-28）
+
+- 新增可分享版 Mac 软件：`apps/daily_a_share_digest_app.py`，并提供 `start_daily_digest.sh` 与 `打开A股每日动态合集.command`。
+- 重大 UI 升级：简约交易终端风格，包含市场状态条、交易员信号队列、观察窗口、技术指标矩阵和可复制文本合集。
+- 新增技术指标引擎：MACD、KDJ、RSI14、BOLL、MA5/10/20/60、量能比、技术评分。
+- 新增并发指标计算：多只股票同步拉取日 K，减少打开等待时间。
+- 修复历史日 K 接口参数，确保 MACD/KDJ 等指标可以稳定计算。
+- 分享版启动脚本会优先使用本机已有环境；没有环境时，会在软件目录下自动创建 `.venv` 并安装依赖。
+
 ## 中文更新内容（2026-05-27）
 
 - 加入 **风扇理论**：把板块当作电风扇叶片，观察资金在冷却、潜伏、启动、加速、高潮、分歧、退潮、修复之间轮动。
@@ -56,6 +65,36 @@ It opens in your browser and includes:
 - 修复扫描：扫描普通沪深主板，寻找修复/低吸观察池。
 
 Public quote endpoints may be delayed or temporarily unavailable. Always verify with your broker before trading.
+
+## 分享版桌面软件
+
+这个仓库还包含一个更完整的本地桌面面板：
+
+```bash
+zsh start_daily_digest.sh
+```
+
+macOS 用户也可以双击：
+
+```text
+打开A股每日动态合集.command
+```
+
+它会启动 `apps/daily_a_share_digest_app.py`，默认打开：
+
+```text
+http://localhost:8503
+```
+
+功能包括：
+
+- 自选池与持仓账本。
+- 市场状态、主线叶片、红盘比例、强势股数、技术均分。
+- MACD/KDJ/RSI/BOLL/均线/量能比/技术评分。
+- 风扇理论板块轮动与蜂巢资金迁徙。
+- 观察池、持仓雷达、文本版每日动态合集。
+
+首次运行需要本机有 `python3`。如果没有可用 Streamlit 环境，脚本会自动创建 `.venv` 并安装 `requirements.txt`。
 
 ## Scripts
 
