@@ -34,7 +34,7 @@ EASTMONEY_KLINE_URL = (
 SINA_INDEX_URL = "https://hq.sinajs.cn/list=sh000001,sz399001,sz399006,sh000688,sz399300"
 
 DEFAULT_CODES = "600487 000758 000733 603678 000636 600522 603601 600396 002491 002241 603005 002456 000988"
-DEFAULT_POSITIONS = "600487 200 68.62\n002491 100 22.05"
+DEFAULT_POSITIONS = ""
 
 SECTORS = {
     "军工电子/电子元件": ["000733", "603678", "000636"],
@@ -1084,8 +1084,15 @@ def main() -> None:
         code_count = len(set(parse_codes(codes_text)))
         st.caption(f"已识别 {code_count} 只自选股")
 
-        render_sidebar_card("持仓账本", "每行：代码 股数 成本。这里只用于风险线和浮盈亏观察，不会连接券商下单。")
-        positions_text = st.text_area("持仓", DEFAULT_POSITIONS, height=92, label_visibility="collapsed", placeholder="600487 200 68.62\n002491 100 22.05")
+        render_sidebar_card("持仓账本", "每行：代码 股数 成本。示例：600111 200 51.75。这里只用于风险线和浮盈亏观察，不会连接券商下单。")
+        positions_text = st.text_area(
+            "持仓",
+            DEFAULT_POSITIONS,
+            height=110,
+            label_visibility="collapsed",
+            placeholder="示例（可多行）:\n600111 200 51.75\n000758 100 20.30",
+        )
+        st.caption("支持空格/逗号/冒号分隔，例如：600111,200,51.75 或 600111:200:51.75")
         pos_count = len(parse_positions(positions_text))
         st.caption(f"已识别 {pos_count} 条持仓")
 

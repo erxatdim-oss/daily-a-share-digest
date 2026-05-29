@@ -7,6 +7,7 @@ This skill is a research aid only. It does not provide personalized investment a
 ## 中文更新内容（2026-05-28）
 
 - 新增可分享版 Mac 软件：`apps/daily_a_share_digest_app.py`，并提供 `start_daily_digest.sh` 与 `打开A股每日动态合集.command`。
+- 分享版已改为通用默认输入：不预置任何个人持仓，所有使用者自行填写自己的代码/仓位。
 - 重大 UI 升级：简约交易终端风格，包含市场状态条、交易员信号队列、观察窗口、技术指标矩阵和可复制文本合集。
 - 新增技术指标引擎：MACD、KDJ、RSI14、BOLL、MA5/10/20/60、量能比、技术评分。
 - 新增并发指标计算：多只股票同步拉取日 K，减少打开等待时间。
