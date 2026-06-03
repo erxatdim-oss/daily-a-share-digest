@@ -1,11 +1,11 @@
 ---
 name: daily-a-share-digest
-description: Use when preparing a daily A-share market dynamic digest for mainland China equities: indexes, breadth, volume, hot themes, sector rotation, 连板天梯, 龙虎榜, 资金流向, major announcements, risk notes, optional watchlists, 风扇理论板块轮动, 蜂巢理论资金迁徙, repair/bottom-fishing scans, and position checks. Triggers for 每日A股动态合集, A股动态, A股复盘, 国内股票, 沪深京股票, 股票观察清单, 板块轮动, 修复低吸, 抄底观察, 风扇理论, 蜂巢理论, or next-session A股 tracking. This skill must not present personalized investment advice or guaranteed predictions.
+description: Use when preparing A股短线王 / daily A-share market research for mainland China equities: indexes, breadth, volume, hot themes, sector rotation, 连板天梯, 龙虎榜, 资金流向, major announcements, risk notes, optional watchlists, 风扇理论板块轮动, 蜂巢理论资金迁徙, repair/bottom-fishing scans, backtest-oriented observation, and position checks. Triggers for A股短线王, 每日A股动态合集, A股动态, A股复盘, 国内股票, 沪深京股票, 股票观察清单, 板块轮动, 修复低吸, 抄底观察, 风扇理论, 蜂巢理论, or next-session A股 tracking. This skill must not present personalized investment advice or guaranteed predictions.
 ---
 
-# Daily A-Share Dynamic Digest
+# A股短线王
 
-Use this skill to produce a daily A股 dynamic digest: market temperature, hot themes, sentiment, capital flow, announcements, sector-rotation models, and optional watchlists. The output is a research aid, not personalized financial advice.
+Use this skill to produce A股短线王 research notes: market temperature, hot themes, sentiment, capital flow, announcements, sector-rotation models, optional watchlists, and risk-aware short-term scenarios. The output is a research aid, not personalized financial advice.
 
 ## Safety Rules
 
@@ -69,7 +69,7 @@ Use these models as structured observation frameworks, not prediction engines. F
 Use bundled scripts when local execution is helpful:
 
 - `scripts/a_share_watch.py`: fetch public quotes and render current price, one-lot cash, position P/L, key lines, and risk state.
-  - Example: `python scripts/a_share_watch.py -p 600487:200:68.82 000758`
+  - Example: `python scripts/a_share_watch.py -p 600000:100:10.00 000001`
 - `scripts/a_share_scan.py`: scan ordinary Shanghai/Shenzhen main-board names from Eastmoney-style public data and rank repair/low-absorption candidates with transparent factors.
   - Example: `python scripts/a_share_scan.py --pages 8 --top 30`
 - `apps/a_share_visual_app.py`: Streamlit dashboard for Mac/browser use, including holdings, fan-blade rotation, honeycomb flow, and repair scan.
@@ -125,7 +125,7 @@ Use bundled scripts when local execution is helpful:
 Write in Chinese unless the user asks otherwise.
 
 Start with this disclaimer:
-"以下是每日A股动态合集，不构成个性化投资建议。"
+"以下是A股短线王研究观察，不构成个性化投资建议。"
 
 Then provide:
 

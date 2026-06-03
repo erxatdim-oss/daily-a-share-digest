@@ -12,9 +12,12 @@ import datetime as dt
 import html
 import json
 import math
+import os
 import re
+import subprocess
 import urllib.parse
 import urllib.request
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -31,9 +34,17 @@ EASTMONEY_KLINE_URL = (
     "&end=20500101"
     "&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
 )
+TENCENT_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={symbol},day,,,{limit},qfq"
 SINA_INDEX_URL = "https://hq.sinajs.cn/list=sh000001,sz399001,sz399006,sh000688,sz399300"
+EASTMONEY_INDEX_URL = (
+    "https://push2.eastmoney.com/api/qt/ulist.np/get"
+    "?fltt=2&invt=2&fields=f14,f12,f2,f3&secids=1.000001,0.399001,0.399006,1.000688,0.399300"
+)
+DEFAULT_REFERENCE_URL = "https://npcs1983.top"
+TRADE_LOG_PATH = os.path.expanduser("~/.a_share_daily_digest/trade_log.csv")
+CN_TZ = ZoneInfo("Asia/Shanghai")
 
-DEFAULT_CODES = "600487 000758 000733 603678 000636 600522 603601 600396 002491 002241 603005 002456 000988"
+DEFAULT_CODES = ""
 DEFAULT_POSITIONS = ""
 
 SECTORS = {
@@ -76,6 +87,213 @@ def fetch_url(url: str, encoding: str = "utf-8", timeout: float = 8) -> str:
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode(encoding, errors="replace")
+
+
+def compact_text(value: object, limit: int = 180) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)] + "…"
+
+
+def normalize_reference_url(url: str) -> str:
+    raw = (url or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    parsed = urllib.parse.urlparse(raw if re.match(r"^https?://", raw) else f"https://{raw}")
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def fetch_json_url(url: str, timeout: float = 5) -> dict[str, object]:
+    try:
+        return json.loads(fetch_url(url, timeout=timeout))
+    except Exception:
+        pass
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/curl", "-L", "-s", "--max-time", str(max(1, int(math.ceil(timeout)))), url],
+            capture_output=True,
+            text=True,
+            timeout=timeout + 1,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return json.loads(proc.stdout)
+    except Exception:
+        return {}
+    return {}
+
+
+def fetch_reference_endpoint(base_url: str, endpoint: str, timeout: float) -> dict[str, object]:
+    if not base_url:
+        return {}
+    return fetch_json_url(f"{base_url}{endpoint}", timeout=timeout)
+
+
+@st.cache_data(ttl=45)
+def fetch_reference_bundle(base_url: str, enabled: bool) -> dict[str, object]:
+    base = normalize_reference_url(base_url)
+    if not enabled or not base:
+        return {}
+    endpoints = {
+        "status": ("/api/market/status", 4.0),
+        "indices": ("/api/market/indices", 4.0),
+        "main_flow": ("/api/main-fund-flow?limit=8", 5.0),
+    }
+    result: dict[str, object] = {"base_url": base, "ok": False}
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(endpoints))
+    futures = {
+        executor.submit(fetch_reference_endpoint, base, endpoint, timeout): key
+        for key, (endpoint, timeout) in endpoints.items()
+    }
+    try:
+        for future in concurrent.futures.as_completed(futures, timeout=7):
+            key = futures[future]
+            try:
+                payload = future.result(timeout=0.1)
+            except Exception:
+                payload = {}
+            result[key] = payload
+            if payload:
+                result["ok"] = True
+    except concurrent.futures.TimeoutError:
+        pass
+    finally:
+        for future, key in futures.items():
+            if key in result:
+                continue
+            if future.done():
+                try:
+                    payload = future.result(timeout=0.1)
+                except Exception:
+                    payload = {}
+                result[key] = payload
+                if payload:
+                    result["ok"] = True
+            else:
+                future.cancel()
+                result[key] = {}
+        executor.shutdown(wait=False, cancel_futures=True)
+    return result
+
+
+@st.cache_data(ttl=180)
+def fetch_reference_report_payload(base_url: str, enabled: bool) -> dict[str, object]:
+    base = normalize_reference_url(base_url)
+    if not enabled or not base:
+        return {}
+    return fetch_reference_endpoint(base, "/api/report/latest", 8.0)
+
+
+def reference_status(bundle: dict[str, object]) -> dict[str, object]:
+    payload = bundle.get("status") if isinstance(bundle, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    status = payload.get("status")
+    return status if isinstance(status, dict) else {}
+
+
+def reference_report(bundle: dict[str, object]) -> dict[str, object]:
+    payload = bundle.get("report") if isinstance(bundle, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    report = payload.get("report")
+    return report if isinstance(report, dict) else {}
+
+
+def reference_indices_df(bundle: dict[str, object]) -> pd.DataFrame:
+    payload = bundle.get("indices") if isinstance(bundle, dict) else {}
+    if not isinstance(payload, dict):
+        return pd.DataFrame()
+    rows = []
+    for item in payload.get("indices") or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "指数": item.get("name") or item.get("code") or "-",
+                "最新": parse_float(item.get("price")),
+                "涨跌": parse_float(item.get("change_amt")),
+                "涨跌幅%": parse_float(item.get("change_pct")),
+                "时间": "",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def reference_flow_df(bundle: dict[str, object], side: str = "inflow") -> pd.DataFrame:
+    payload = bundle.get("main_flow") if isinstance(bundle, dict) else {}
+    if not isinstance(payload, dict):
+        return pd.DataFrame()
+    rows = []
+    for item in payload.get(side) or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "排名": item.get("rank"),
+                "代码": str(item.get("code") or ""),
+                "名称": item.get("name") or "-",
+                "最新价": parse_float(item.get("price")),
+                "涨跌幅%": parse_float(item.get("change_pct")),
+                "主力净额": parse_float(item.get("main_net_amount")),
+                "主力净额文本": item.get("main_net_amount_text") or cn_money(parse_float(item.get("main_net_amount"))),
+                "净占比": item.get("net_ratio_text") or "",
+                "换手率": item.get("turnover_rate_text") or "",
+                "来源": item.get("source") or "外部参考",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def reference_sectors_df(bundle: dict[str, object], limit: int = 12) -> pd.DataFrame:
+    report = reference_report(bundle)
+    sectors = report.get("sectors") or []
+    if not sectors and isinstance(report.get("sector_views"), dict):
+        today = report["sector_views"].get("today") or {}
+        sectors = today.get("sectors") or []
+    rows = []
+    for item in sectors[:limit]:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "排名": item.get("rank"),
+                "板块": item.get("name") or "-",
+                "涨跌幅%": parse_float(item.get("change_pct")),
+                "评分": parse_float(item.get("score")),
+                "成交额": item.get("amount"),
+                "换手率": item.get("turnover_rate"),
+                "理由": item.get("reason") or "",
+                "对比": (item.get("compare") or {}).get("text") if isinstance(item.get("compare"), dict) else "",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def reference_stocks_df(bundle: dict[str, object], limit: int = 12) -> pd.DataFrame:
+    report = reference_report(bundle)
+    rows = []
+    for item in (report.get("stocks") or [])[:limit]:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "排名": item.get("rank"),
+                "代码": str(item.get("code") or item.get("plain_code") or ""),
+                "名称": item.get("name") or "-",
+                "板块": item.get("sector") or "-",
+                "现价": parse_float(item.get("price")),
+                "涨跌幅%": parse_float(item.get("change_pct")),
+                "评分": parse_float(item.get("rank_score") or item.get("score")),
+                "建议": item.get("advice") or item.get("position_hint") or "",
+                "风控": item.get("stop_loss") or "",
+                "理由": item.get("reason") or "",
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def parse_float(value: object, scale: float = 1.0) -> float:
@@ -215,12 +433,12 @@ def get_quotes(codes: tuple[str, ...]) -> pd.DataFrame:
 
 @st.cache_data(ttl=1800)
 def fetch_kline(code: str, limit: int = 180) -> pd.DataFrame:
+    rows = []
     try:
-        text = fetch_url(EASTMONEY_KLINE_URL.format(secid=eastmoney_secid(code), limit=limit), timeout=4)
+        text = fetch_url(EASTMONEY_KLINE_URL.format(secid=eastmoney_secid(code), limit=limit), timeout=6)
         data = json.loads(text).get("data") or {}
     except Exception:
-        return pd.DataFrame()
-    rows = []
+        data = {}
     for item in data.get("klines") or []:
         fields = item.split(",")
         if len(fields) < 11:
@@ -239,6 +457,39 @@ def fetch_kline(code: str, limit: int = 180) -> pd.DataFrame:
                     "涨跌幅%": float(fields[8]),
                     "涨跌额": float(fields[9]),
                     "换手%": float(fields[10]),
+                }
+            )
+        except ValueError:
+            continue
+    if rows:
+        return pd.DataFrame(rows)
+
+    # Fallback: Tencent qfq daily kline
+    try:
+        symbol = f"{market_prefix(code)}{code}"
+        t_text = fetch_url(TENCENT_KLINE_URL.format(symbol=symbol, limit=limit), timeout=6)
+        t_data = json.loads(t_text).get("data", {}).get(symbol, {})
+    except Exception:
+        return pd.DataFrame()
+    day_rows = t_data.get("qfqday") or t_data.get("day") or []
+    for row in day_rows:
+        # [date, open, close, high, low, volume, ...]
+        if len(row) < 6:
+            continue
+        try:
+            rows.append(
+                {
+                    "日期": row[0],
+                    "开盘": float(row[1]),
+                    "收盘": float(row[2]),
+                    "最高": float(row[3]),
+                    "最低": float(row[4]),
+                    "成交量": float(row[5]),
+                    "成交额": 0.0,
+                    "振幅%": 0.0,
+                    "涨跌幅%": 0.0,
+                    "涨跌额": 0.0,
+                    "换手%": 0.0,
                 }
             )
         except ValueError:
@@ -385,10 +636,190 @@ def get_indicators(codes: tuple[str, ...]) -> pd.DataFrame:
     unique_codes = sorted(set(codes))
     if not unique_codes:
         return pd.DataFrame()
-    workers = min(8, len(unique_codes))
+    workers = min(4, len(unique_codes))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         rows = list(executor.map(calculate_indicator_row, unique_codes))
     return pd.DataFrame(rows)
+
+
+def prepare_backtest_kline(code: str, limit: int) -> pd.DataFrame:
+    kline = fetch_kline(code, limit)
+    if kline.empty:
+        return pd.DataFrame()
+    df = kline.copy()
+    needed = ["日期", "开盘", "收盘", "最高", "最低", "成交量"]
+    missing = [col for col in needed if col not in df.columns]
+    if missing:
+        return pd.DataFrame()
+    df = df[needed].copy()
+    for col in ["开盘", "收盘", "最高", "最低", "成交量"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+    df = df.dropna(subset=["日期", "开盘", "收盘", "最高", "最低"]).sort_values("日期")
+    df = df.drop_duplicates("日期").tail(limit).reset_index(drop=True)
+    return df
+
+
+def build_backtest_signals(df: pd.DataFrame, strategy: str) -> tuple[pd.Series, pd.Series]:
+    close = df["收盘"]
+    high = df["最高"]
+    low = df["最低"]
+    ma5 = close.rolling(5).mean()
+    ma10 = close.rolling(10).mean()
+    ma20 = close.rolling(20).mean()
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    dif = ema12 - ema26
+    dea = dif.ewm(span=9, adjust=False).mean()
+    low9 = low.rolling(9).min()
+    high9 = high.rolling(9).max()
+    rsv = (close - low9) / (high9 - low9).replace(0, math.nan) * 100
+    k = rsv.ewm(com=2, adjust=False).mean()
+    d = k.ewm(com=2, adjust=False).mean()
+
+    if strategy == "MA5上穿MA20":
+        buy = (ma5.shift(1) <= ma20.shift(1)) & (ma5 > ma20)
+        sell = (ma5.shift(1) >= ma20.shift(1)) & (ma5 < ma20)
+    elif strategy == "MACD金叉死叉":
+        buy = (dif.shift(1) <= dea.shift(1)) & (dif > dea)
+        sell = (dif.shift(1) >= dea.shift(1)) & (dif < dea)
+    elif strategy == "KDJ低位金叉":
+        buy = (k.shift(1) <= d.shift(1)) & (k > d) & (k < 65)
+        sell = ((k.shift(1) >= d.shift(1)) & (k < d)) | (k > 85)
+    elif strategy == "20日新高突破":
+        prev_high20 = high.shift(1).rolling(20).max()
+        buy = close > prev_high20
+        sell = close < ma10
+    else:
+        buy = (ma5 > ma20) & (dif > dea) & (dif.shift(1) <= dea.shift(1))
+        sell = (close < ma10) | ((dif.shift(1) >= dea.shift(1)) & (dif < dea))
+    return buy.fillna(False), sell.fillna(False)
+
+
+def run_single_backtest(
+    code: str,
+    name: str,
+    strategy: str,
+    limit: int,
+    initial_cash: float,
+    fee_bps: float,
+    stamp_tax_pct: float,
+    slippage_pct: float,
+    stop_loss_pct: float,
+    take_profit_pct: float,
+) -> tuple[dict[str, object], pd.DataFrame, pd.DataFrame]:
+    df = prepare_backtest_kline(code, limit)
+    if len(df) < 60:
+        return (
+            {
+                "代码": code,
+                "名称": name,
+                "策略": strategy,
+                "样本天数": len(df),
+                "总收益%": None,
+                "买入持有%": None,
+                "超额%": None,
+                "最大回撤%": None,
+                "交易次数": 0,
+                "胜率%": None,
+                "结论": "K线不足",
+            },
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
+
+    buy_signal, sell_signal = build_backtest_signals(df, strategy)
+    fee_rate = fee_bps / 10000
+    stamp_rate = stamp_tax_pct / 100
+    slip_rate = slippage_pct / 100
+    stop_rate = stop_loss_pct / 100
+    take_rate = take_profit_pct / 100
+    cash = float(initial_cash)
+    shares = 0
+    entry_price = 0.0
+    entry_date = None
+    trades: list[dict[str, object]] = []
+    curve = []
+
+    first_close = float(df["收盘"].iloc[0])
+    for i in range(1, len(df)):
+        today = df.iloc[i]
+        prev = df.iloc[i - 1]
+        open_price = float(today["开盘"])
+        prev_close = float(prev["收盘"])
+
+        if shares > 0:
+            stop_hit = prev_close <= entry_price * (1 - stop_rate)
+            take_hit = prev_close >= entry_price * (1 + take_rate)
+            if bool(sell_signal.iloc[i - 1]) or stop_hit or take_hit:
+                reason = "止损" if stop_hit else "止盈" if take_hit else "策略卖出"
+                sell_price = open_price * (1 - slip_rate)
+                gross = shares * sell_price
+                cash += gross * (1 - fee_rate - stamp_rate)
+                pnl_pct = (sell_price / entry_price - 1) * 100
+                trades.append(
+                    {
+                        "买入日": entry_date.strftime("%Y-%m-%d") if entry_date is not None else "-",
+                        "卖出日": today["日期"].strftime("%Y-%m-%d"),
+                        "买入价": entry_price,
+                        "卖出价": sell_price,
+                        "股数": shares,
+                        "收益%": pnl_pct,
+                        "卖出原因": reason,
+                    }
+                )
+                shares = 0
+                entry_price = 0.0
+                entry_date = None
+
+        if shares == 0 and bool(buy_signal.iloc[i - 1]):
+            buy_price = open_price * (1 + slip_rate)
+            lot = int(cash / (buy_price * (1 + fee_rate)) // 100 * 100)
+            if lot >= 100:
+                cash -= lot * buy_price * (1 + fee_rate)
+                shares = lot
+                entry_price = buy_price
+                entry_date = today["日期"]
+
+        equity = cash + shares * float(today["收盘"])
+        benchmark = initial_cash * float(today["收盘"]) / first_close if first_close else initial_cash
+        curve.append({"日期": today["日期"], "资产曲线": equity, "买入持有": benchmark})
+
+    curve_df = pd.DataFrame(curve)
+    trades_df = pd.DataFrame(trades)
+    final_equity = float(curve_df["资产曲线"].iloc[-1]) if not curve_df.empty else initial_cash
+    total_return = (final_equity / initial_cash - 1) * 100
+    benchmark_return = (float(df["收盘"].iloc[-1]) / first_close - 1) * 100 if first_close else 0.0
+    running_high = curve_df["资产曲线"].cummax() if not curve_df.empty else pd.Series([initial_cash])
+    drawdown = curve_df["资产曲线"] / running_high - 1 if not curve_df.empty else pd.Series([0.0])
+    max_drawdown = float(drawdown.min() * 100)
+    win_rate = float((trades_df["收益%"] > 0).mean() * 100) if not trades_df.empty else None
+    if total_return > benchmark_return and max_drawdown > -18:
+        conclusion = "跑赢持有"
+    elif total_return > 0 and max_drawdown > -25:
+        conclusion = "有正收益"
+    elif max_drawdown <= -25:
+        conclusion = "回撤偏大"
+    else:
+        conclusion = "策略无优势"
+
+    return (
+        {
+            "代码": code,
+            "名称": name,
+            "策略": strategy,
+            "样本天数": len(df),
+            "总收益%": total_return,
+            "买入持有%": benchmark_return,
+            "超额%": total_return - benchmark_return,
+            "最大回撤%": max_drawdown,
+            "交易次数": len(trades_df),
+            "胜率%": win_rate,
+            "结论": conclusion,
+        },
+        curve_df,
+        trades_df,
+    )
 
 
 @st.cache_data(ttl=20)
@@ -398,21 +829,37 @@ def fetch_indices() -> pd.DataFrame:
     try:
         text = fetch_url(SINA_INDEX_URL, "gbk")
     except Exception:
-        return pd.DataFrame()
+        text = ""
     rows = []
-    for code, default_name in zip(codes, names):
-        match = re.search(rf"hq_str_{code}=\"([^\"]*)\"", text)
-        if not match:
-            continue
-        fields = match.group(1).split(",")
-        if len(fields) < 5:
-            continue
-        name = fields[0] or default_name
-        prev_close = parse_float(fields[2])
-        current = parse_float(fields[3])
-        change = current - prev_close if prev_close else 0.0
-        pct = change / prev_close * 100 if prev_close else 0.0
-        rows.append({"指数": name, "最新": current, "涨跌": change, "涨跌幅%": pct, "时间": fields[-3] if len(fields) > 3 else ""})
+    if text:
+        for code, default_name in zip(codes, names):
+            match = re.search(rf"hq_str_{code}=\"([^\"]*)\"", text)
+            if not match:
+                continue
+            fields = match.group(1).split(",")
+            if len(fields) < 5:
+                continue
+            name = fields[0] or default_name
+            prev_close = parse_float(fields[2])
+            current = parse_float(fields[3])
+            change = current - prev_close if prev_close else 0.0
+            pct = change / prev_close * 100 if prev_close else 0.0
+            rows.append({"指数": name, "最新": current, "涨跌": change, "涨跌幅%": pct, "时间": fields[-3] if len(fields) > 3 else ""})
+    if rows:
+        return pd.DataFrame(rows)
+
+    # Fallback when Sina index API is blocked or delayed.
+    try:
+        em_text = fetch_url(EASTMONEY_INDEX_URL)
+        em_data = json.loads(em_text).get("data", {}).get("diff", [])
+    except Exception:
+        return pd.DataFrame()
+    for item in em_data:
+        name = str(item.get("f14") or "")
+        current = parse_float(item.get("f2"))
+        pct = parse_float(item.get("f3"))
+        change = current * pct / 100 if current else 0.0
+        rows.append({"指数": name, "最新": current, "涨跌": change, "涨跌幅%": pct, "时间": ""})
     return pd.DataFrame(rows)
 
 
@@ -495,9 +942,71 @@ def sector_rotation(quotes: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("风扇分", ascending=False)
 
 
+def classify_fan_leaf(stage: str, fan_score: float, rank: int, total: int) -> str:
+    """Map sector state into simple rotation labels for quick intraday reading."""
+    top_half = rank <= max(1, math.ceil(total * 0.5))
+    if stage == "加速/高潮":
+        return "加速"
+    if stage == "启动":
+        return "启动"
+    if stage == "修复/潜伏":
+        return "潜伏" if top_half or fan_score >= 54 else "冷却"
+    if stage == "分歧":
+        return "退潮" if not top_half else "冷却"
+    if stage == "退潮":
+        return "退潮"
+    return "冷却"
+
+
+def build_fan_radar(rotation: pd.DataFrame) -> pd.DataFrame:
+    if rotation.empty:
+        return pd.DataFrame()
+    radar = rotation.copy().reset_index(drop=True)
+    total = len(radar)
+    radar["风叶阶段"] = [
+        classify_fan_leaf(str(row["状态"]), float(row["风扇分"]), idx + 1, total)
+        for idx, (_, row) in enumerate(radar.iterrows())
+    ]
+    radar["甜点分"] = (radar["风扇分"].rank(pct=True) * 100).round(0).astype(int)
+    return radar
+
+
+def build_rotation_clock(rotation: pd.DataFrame) -> pd.DataFrame:
+    if rotation.empty:
+        return pd.DataFrame()
+    clock_order = ["加速", "启动", "潜伏", "冷却", "退潮"]
+    rows = []
+    radar = build_fan_radar(rotation)
+    for stage in clock_order:
+        names = radar[radar["风叶阶段"] == stage]["板块叶片"].tolist()
+        rows.append({"时钟阶段": stage, "板块": "、".join(names) if names else "-"})
+    return pd.DataFrame(rows)
+
+
+def load_trade_log() -> pd.DataFrame:
+    cols = ["日期", "代码", "名称", "方向", "价格", "股数", "理由", "结果%", "备注"]
+    if not os.path.exists(TRADE_LOG_PATH):
+        return pd.DataFrame(columns=cols)
+    try:
+        df = pd.read_csv(TRADE_LOG_PATH, dtype={"代码": str})
+    except Exception:
+        return pd.DataFrame(columns=cols)
+    for col in cols:
+        if col not in df.columns:
+            df[col] = ""
+    return df[cols]
+
+
+def append_trade_log(entry: dict[str, object]) -> None:
+    os.makedirs(os.path.dirname(TRADE_LOG_PATH), exist_ok=True)
+    df = load_trade_log()
+    df = pd.concat([df, pd.DataFrame([entry])], ignore_index=True)
+    df.to_csv(TRADE_LOG_PATH, index=False, encoding="utf-8-sig")
+
+
 def digest_text(indices: pd.DataFrame, quotes: pd.DataFrame, positions: pd.DataFrame, rotation: pd.DataFrame) -> str:
-    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-    lines = [f"每日A股动态合集 - {now}", "以下内容不构成个性化投资建议。", ""]
+    now = cn_now().strftime("%Y-%m-%d %H:%M")
+    lines = [f"A股短线王 - {now}", "以下内容不构成个性化投资建议。", ""]
     if not indices.empty:
         idx = "；".join(f"{r['指数']} {r['最新']:.2f}({r['涨跌幅%']:+.2f}%)" for _, r in indices.iterrows())
         lines += ["市场温度", idx, ""]
@@ -715,6 +1224,95 @@ def inject_design() -> None:
           font-size: 16px;
           margin: 0 0 8px 0;
         }
+        .cockpit {
+          border: 1px solid var(--line-strong);
+          background: #ffffff;
+          border-radius: 8px;
+          padding: 14px;
+          margin: 12px 0;
+        }
+        .cockpit-head {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+          padding-bottom: 12px;
+          border-bottom: 1px solid var(--line);
+          margin-bottom: 12px;
+        }
+        .cockpit-title {
+          font-size: 18px;
+          font-weight: 780;
+          color: var(--ink);
+        }
+        .cockpit-sub {
+          color: var(--muted);
+          font-size: 13px;
+          margin-top: 3px;
+        }
+        .cockpit-grid {
+          display: grid;
+          grid-template-columns: 1.15fr .85fr .85fr;
+          gap: 10px;
+        }
+        .cockpit-card {
+          border: 1px solid var(--line);
+          background: #f9fafb;
+          border-radius: 8px;
+          padding: 12px;
+          min-height: 138px;
+        }
+        .cockpit-card h4 {
+          margin: 0 0 8px 0;
+          font-size: 14px;
+          color: #374151;
+        }
+        .market-state-main {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin-bottom: 8px;
+        }
+        .market-state-main strong {
+          font-size: 22px;
+          color: var(--ink);
+        }
+        .market-prompt {
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.55;
+        }
+        .flow-row, .rank-row {
+          display: grid;
+          grid-template-columns: 24px minmax(0, 1fr) auto;
+          gap: 8px;
+          align-items: center;
+          border-top: 1px solid var(--line);
+          padding: 7px 0;
+          font-size: 13px;
+        }
+        .flow-row:first-of-type, .rank-row:first-of-type { border-top: 0; }
+        .rank-no {
+          color: var(--soft);
+          font-weight: 760;
+        }
+        .rank-main {
+          min-width: 0;
+        }
+        .rank-main b {
+          display: block;
+          color: var(--ink);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .rank-main small {
+          display: block;
+          color: var(--muted);
+          font-size: 11px;
+        }
+        .money-in { color: var(--red); font-weight: 760; }
+        .money-out { color: var(--green); font-weight: 760; }
         .signal {
           display: grid;
           grid-template-columns: 92px 1fr;
@@ -806,7 +1404,7 @@ def inject_design() -> None:
         .muted { color: var(--muted); }
         .compact-table div[data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
         @media (max-width: 900px) {
-          .status-grid, .tech-grid { grid-template-columns: 1fr; }
+          .status-grid, .tech-grid, .cockpit-grid { grid-template-columns: 1fr; }
           .signal { grid-template-columns: 1fr; }
         }
         </style>
@@ -832,6 +1430,25 @@ def market_phase(now: dt.datetime) -> str:
     if t < dt.time(15, 0):
         return "尾盘决策"
     return "收盘复盘"
+
+
+def cn_now() -> dt.datetime:
+    return dt.datetime.now(CN_TZ)
+
+
+def trading_day_status(now: dt.datetime) -> str:
+    if now.weekday() >= 5:
+        return "休市"
+    t = now.time()
+    if t < dt.time(9, 15):
+        return "盘前"
+    if dt.time(9, 15) <= t < dt.time(11, 30):
+        return "交易中"
+    if dt.time(11, 30) <= t < dt.time(13, 0):
+        return "午休"
+    if dt.time(13, 0) <= t < dt.time(15, 0):
+        return "交易中"
+    return "收盘后"
 
 
 def index_temperature(indices: pd.DataFrame) -> tuple[str, str]:
@@ -876,6 +1493,126 @@ def make_watchlist(quotes: pd.DataFrame, cash: int, max_pct: float = 7.0) -> pd.
         sort_cols = ["技术评分", "涨跌幅%", "成交额"]
         ascending = [False, False, False]
     return watch.sort_values(sort_cols, ascending=ascending)
+
+
+def make_bottom_watchlist(quotes: pd.DataFrame, cash: int) -> pd.DataFrame:
+    """Bottom-fishing observation pool (not buy advice)."""
+    if quotes.empty:
+        return pd.DataFrame()
+    pool = quotes[
+        (quotes["一手资金"] <= cash)
+        & (quotes["涨跌幅%"].between(-7, 3))
+        & (quotes["状态"].isin(["修复中", "均线下方"]))
+    ].copy()
+    if pool.empty:
+        return pool
+    if "技术评分" in pool.columns:
+        pool = pool[pool["技术评分"] >= 42]
+        return pool.sort_values(["技术评分", "涨跌幅%"], ascending=[False, False])
+    return pool.sort_values(["涨跌幅%", "成交额"], ascending=[False, False])
+
+
+def make_entry_watchlist(quotes: pd.DataFrame, cash: int, max_pct: float = 7.0) -> pd.DataFrame:
+    """Trend-follow observation pool (not buy advice)."""
+    if quotes.empty:
+        return pd.DataFrame()
+    pool = quotes[
+        (quotes["一手资金"] <= cash)
+        & (quotes["涨跌幅%"].between(-2, max_pct))
+        & (quotes["状态"].isin(["站上均价", "均线上方", "修复中"]))
+    ].copy()
+    if pool.empty:
+        return pool
+    if "技术评分" in pool.columns:
+        pool = pool[pool["技术评分"] >= 55]
+        return pool.sort_values(["技术评分", "涨跌幅%"], ascending=[False, False])
+    return pool.sort_values(["涨跌幅%", "成交额"], ascending=[False, False])
+
+
+def build_position_plan(quotes: pd.DataFrame, total_capital: int, max_single_pct: float, reserve_pct: float) -> pd.DataFrame:
+    if quotes.empty:
+        return pd.DataFrame()
+    reserve_cash = total_capital * reserve_pct / 100
+    tradable_capital = max(total_capital - reserve_cash, 0)
+    single_budget = tradable_capital * max_single_pct / 100
+    rows = []
+    for _, row in quotes.iterrows():
+        lot_cash = float(row["一手资金"])
+        max_lots = int(single_budget // lot_cash) if lot_cash > 0 else 0
+        rows.append(
+            {
+                "代码": row["代码"],
+                "名称": row["名称"],
+                "最新价": row["最新价"],
+                "一手资金": lot_cash,
+                "单票预算": single_budget,
+                "最多可买手数": max_lots,
+                "最多可买股数": max_lots * 100,
+                "预算占用": max_lots * lot_cash,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_t_dashboard(owned: pd.DataFrame) -> pd.DataFrame:
+    if owned.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, row in owned.iterrows():
+        price = float(row["最新价"])
+        cost = float(row["成本"])
+        high = float(row["日高"])
+        low = float(row["日低"])
+        avg = float(row["均价"]) if pd.notna(row.get("均价")) and row.get("均价") else price
+        rng = max(high - low, 0.01)
+        t_buy = min(avg, low + 0.35 * rng, cost * 0.99)
+        t_sell = max(avg, low + 0.72 * rng, cost * 1.01)
+        rows.append(
+            {
+                "代码": row["代码"],
+                "名称": row["名称"],
+                "最新价": price,
+                "成本": cost,
+                "T低吸观察价": round(t_buy, 3),
+                "T高抛观察价": round(t_sell, 3),
+                "日内波动%": round(rng / max(price, 0.01) * 100, 2),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_main_force_score(quotes: pd.DataFrame) -> pd.DataFrame:
+    if quotes.empty:
+        return pd.DataFrame()
+    df = quotes.copy()
+    rows = []
+    for _, row in df.iterrows():
+        price = float(row["最新价"])
+        pct = float(row["涨跌幅%"])
+        avg = row.get("均价")
+        avg_ok = pd.notna(avg) and float(avg) > 0 and price >= float(avg)
+        macd_ok = str(row.get("MACD信号", "")).find("金叉") >= 0 or str(row.get("MACD信号", "")).find("多头") >= 0
+        kdj_ok = str(row.get("KDJ信号", "")).find("金叉") >= 0
+        vol_ratio = float(row.get("量能比", 0) or 0)
+        score = 0
+        score += 25 if avg_ok else 0
+        score += 20 if vol_ratio >= 1.2 else 0
+        score += 20 if macd_ok else 0
+        score += 15 if kdj_ok else 0
+        score += 20 if pct >= 0 else 0
+        rows.append(
+            {
+                "代码": row["代码"],
+                "名称": row["名称"],
+                "主力动向分": int(min(100, score)),
+                "涨跌幅%": pct,
+                "量能比": vol_ratio if vol_ratio else None,
+                "状态": row.get("状态", "观察"),
+                "结论": "主力活跃" if score >= 70 else "跟踪观察" if score >= 45 else "暂不跟随",
+            }
+        )
+    out = pd.DataFrame(rows).sort_values(["主力动向分", "涨跌幅%"], ascending=[False, False])
+    return out
 
 
 def build_signals(quotes: pd.DataFrame, positions: pd.DataFrame, rotation: pd.DataFrame, cash: int) -> list[dict[str, str]]:
@@ -961,6 +1698,136 @@ def render_status_cards(items: list[tuple[str, str, str]]) -> None:
     st.markdown("".join(html_parts), unsafe_allow_html=True)
 
 
+def render_reference_rows(df: pd.DataFrame, value_col: str, value_class: str, empty_text: str) -> str:
+    if df.empty:
+        return f'<div class="muted">{html.escape(empty_text)}</div>'
+    parts = []
+    for idx, (_, row) in enumerate(df.head(5).iterrows(), 1):
+        name = str(row.get("名称") or row.get("板块") or "-")
+        code = str(row.get("代码") or "")
+        pct = row.get("涨跌幅%")
+        pct_text = f"{float(pct):+.2f}%" if pd.notna(pct) else "-"
+        value = row.get(value_col, "")
+        parts.append(
+            f'<div class="flow-row">'
+            f'<div class="rank-no">{idx}</div>'
+            f'<div class="rank-main"><b>{html.escape(name)}</b><small>{html.escape(code)} {pct_text}</small></div>'
+            f'<div class="{value_class}">{html.escape(str(value))}</div>'
+            f"</div>"
+        )
+    return "".join(parts)
+
+
+def render_reference_cockpit(bundle: dict[str, object]) -> None:
+    if not bundle or not bundle.get("ok"):
+        st.info("外部参考雷达暂未连接成功，本地行情与持仓模块不受影响。")
+        return
+    status = reference_status(bundle)
+    report = reference_report(bundle)
+    inflow = reference_flow_df(bundle, "inflow")
+    outflow = reference_flow_df(bundle, "outflow")
+    sectors = reference_sectors_df(bundle, 8)
+    stocks = reference_stocks_df(bundle, 8)
+
+    label = status.get("label") or report.get("market_tone") or "--"
+    detail = status.get("detail") or status.get("monitor_detail") or "等待交易状态"
+    generated = report.get("generated_at") or status.get("updated_at") or ""
+    prompt = status.get("technical_prompt") or report.get("technical_prompt") or report.get("summary") or "等待外部市场提示。"
+    top_sector = sectors.iloc[0]["板块"] if not sectors.empty else "-"
+    top_stock = stocks.iloc[0]["名称"] if not stocks.empty else "-"
+    source = bundle.get("base_url") or DEFAULT_REFERENCE_URL
+
+    st.markdown(
+        f"""
+        <div class="cockpit">
+          <div class="cockpit-head">
+            <div>
+              <div class="cockpit-title">外部市场雷达</div>
+              <div class="cockpit-sub">参考源：{html.escape(str(source))} · 更新时间：{html.escape(str(generated or "-"))}</div>
+            </div>
+            <span class="pill">只作公开数据参考</span>
+          </div>
+          <div class="cockpit-grid">
+            <div class="cockpit-card">
+              <h4>市场状态</h4>
+              <div class="market-state-main">
+                <span class="badge badge-blue">{html.escape(str(label))}</span>
+                <strong>{html.escape(str(detail))}</strong>
+              </div>
+              <div class="market-prompt">{html.escape(compact_text(prompt, 260))}</div>
+              <div class="strip" style="margin-top:10px">
+                <span class="pill">前排板块：{html.escape(str(top_sector))}</span>
+                <span class="pill">前排热股：{html.escape(str(top_stock))}</span>
+              </div>
+            </div>
+            <div class="cockpit-card">
+              <h4>主力净流入</h4>
+              {render_reference_rows(inflow, "主力净额文本", "money-in", "暂无主力流入数据")}
+            </div>
+            <div class="cockpit-card">
+              <h4>主力净流出</h4>
+              {render_reference_rows(outflow, "主力净额文本", "money-out", "暂无主力流出数据")}
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_reference_tab(bundle: dict[str, object]) -> None:
+    if not bundle or not bundle.get("ok"):
+        st.warning("外部参考雷达暂不可用。可以稍后刷新，或关闭侧边栏的外部参考源。")
+        return
+    status = reference_status(bundle)
+    report = reference_report(bundle)
+    st.caption("外部公开数据源可能滞后或口径不同，仅用于研究和复盘。")
+    cols = st.columns(4)
+    cols[0].metric("外部状态", str(status.get("label") or report.get("market_tone") or "-"))
+    cols[1].metric("板块数量", str(report.get("sector_count") or len(reference_sectors_df(bundle, 100))))
+    cols[2].metric("热股数量", str(len(report.get("stocks") or [])))
+    cols[3].metric("交易阶段", str(status.get("state") or "-"))
+
+    prompt = status.get("technical_prompt") or report.get("technical_prompt") or ""
+    if prompt:
+        st.markdown("#### 外部技术提示")
+        st.info(compact_text(prompt, 720))
+    if not report:
+        st.info("当前是轻量模式：已加载市场状态和主力资金。若要查看外部热点板块/全市场热股，请在左侧勾选“加载完整热点报告（较慢）”后刷新。")
+
+    flow_in = reference_flow_df(bundle, "inflow")
+    flow_out = reference_flow_df(bundle, "outflow")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("主力净流入")
+        if flow_in.empty:
+            st.info("暂无数据。")
+        else:
+            show = flow_in[["排名", "代码", "名称", "最新价", "涨跌幅%", "主力净额文本", "净占比", "换手率"]].copy()
+            st.dataframe(show, use_container_width=True, hide_index=True)
+    with c2:
+        st.subheader("主力净流出")
+        if flow_out.empty:
+            st.info("暂无数据。")
+        else:
+            show = flow_out[["排名", "代码", "名称", "最新价", "涨跌幅%", "主力净额文本", "净占比", "换手率"]].copy()
+            st.dataframe(show, use_container_width=True, hide_index=True)
+
+    st.subheader("外部热点板块")
+    sectors = reference_sectors_df(bundle, 30)
+    if sectors.empty:
+        st.info("暂无板块排行。")
+    else:
+        st.dataframe(sectors, use_container_width=True, hide_index=True)
+
+    st.subheader("外部全市场热股")
+    stocks = reference_stocks_df(bundle, 40)
+    if stocks.empty:
+        st.info("暂无热股排行。")
+    else:
+        st.dataframe(stocks, use_container_width=True, hide_index=True)
+
+
 def score_class(score: int) -> str:
     if score >= 76:
         return "score-hot"
@@ -1001,6 +1868,26 @@ def render_tech_matrix(quotes: pd.DataFrame) -> None:
         )
     html_parts.append("</div>")
     st.markdown("".join(html_parts), unsafe_allow_html=True)
+
+
+def render_indicator_guide() -> None:
+    st.markdown(
+        """
+        <div class="panel">
+          <h3>指标解释</h3>
+          <div class="muted" style="line-height:1.8">
+            <b>MACD</b>：看趋势拐点和强弱延续。金叉偏强、死叉偏弱，但高位金叉也可能是假信号。<br>
+            <b>KDJ</b>：看短线节奏。金叉常见于反弹初段，J值过高容易出现震荡回落。<br>
+            <b>RSI14</b>：看超买超卖。一般 70 上方偏热，30 下方偏冷，需结合趋势看。<br>
+            <b>BOLL</b>：看价格在布林带中的位置。上轨附近偏强但易波动，下轨附近常见修复观察。<br>
+            <b>MA5/10/20/60</b>：看均线结构。多头排列更强；跌破关键均线后先看承接与回收。<br>
+            <b>量能比</b>：看资金活跃度。温和放量更健康，异常巨量要防冲高回落。<br>
+            <b>技术评分</b>：综合观察分，不是买卖指令。请始终结合板块、资金和失效线。
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_signals(signals: list[dict[str, str]]) -> None:
@@ -1055,20 +1942,34 @@ def render_sidebar_card(title: str, body: str) -> None:
     )
 
 
+def pick_mode(options: list[str], default: str) -> str:
+    # Streamlit < 1.40 has no segmented_control.
+    if hasattr(st, "segmented_control"):
+        return st.segmented_control("模式", options, default=default, label_visibility="collapsed")
+    idx = options.index(default) if default in options else 0
+    return st.radio("模式", options, index=idx, horizontal=True, label_visibility="collapsed")
+
+
 def main() -> None:
-    st.set_page_config(page_title="A股每日动态合集", page_icon="📊", layout="wide")
+    st.set_page_config(page_title="A股短线王", page_icon="📊", layout="wide")
     inject_design()
 
     with st.sidebar:
         st.markdown("## 工作台")
         render_sidebar_card("交易设置", "盘中看承接与均价，复盘看主线持续性，低吸观察只筛修复不追高。")
-        mode = st.segmented_control("模式", ["盘中", "复盘", "低吸观察"], default="盘中", label_visibility="collapsed")
+        mode = pick_mode(["盘中", "复盘", "低吸观察"], "盘中")
         c_cash, c_pct = st.columns([1.05, 0.95])
         with c_cash:
             cash = st.number_input("一手资金上限", min_value=500, value=7000, step=500)
         with c_pct:
             max_watch_pct = st.number_input("观察涨幅上限", min_value=3.0, max_value=12.0, value=7.0, step=0.5, format="%.1f")
         max_watch_pct = st.slider("观察涨幅上限辅助滑杆", 3.0, 12.0, max_watch_pct, 0.5, label_visibility="collapsed")
+        total_capital = st.number_input("总资金", min_value=1000, value=10000, step=500)
+        p_col1, p_col2 = st.columns(2)
+        with p_col1:
+            max_single_pct = st.number_input("单票上限%", min_value=5.0, max_value=100.0, value=30.0, step=5.0, format="%.1f")
+        with p_col2:
+            reserve_pct = st.number_input("预留现金%", min_value=0.0, max_value=60.0, value=20.0, step=5.0, format="%.1f")
 
         st.markdown(
             f"""
@@ -1079,10 +1980,12 @@ def main() -> None:
             """,
             unsafe_allow_html=True,
         )
-        render_sidebar_card("股票池", "只填 6 位代码，空格或换行都可以。建议只放真正会看的票，列表越干净越像交易台。")
-        codes_text = st.text_area("自选池", DEFAULT_CODES, height=128, label_visibility="collapsed", placeholder="600487 000758 000733\n603678 000636 600522")
+        st.caption(f"可交易资金约 {int(total_capital * (100 - reserve_pct) / 100)} 元；单票预算约 {int(total_capital * (100 - reserve_pct) / 100 * max_single_pct / 100)} 元")
+        render_sidebar_card("股票池", "默认留空。你可自己填 6 位代码，空格或换行都可以；每次刷新会自动给出低吸观察和顺势观察候选。")
+        codes_text = st.text_area("自选池", DEFAULT_CODES, height=128, label_visibility="collapsed", placeholder="示例：\n600487 000758 000733")
         code_count = len(set(parse_codes(codes_text)))
         st.caption(f"已识别 {code_count} 只自选股")
+        full_scan = st.toggle("扩展板块全量扫描（更慢）", value=False, help="关闭时优先保证刷新速度；开启后会拉取更多板块样本。")
 
         render_sidebar_card("持仓账本", "每行：代码 股数 成本。示例：600111 200 51.75。这里只用于风险线和浮盈亏观察，不会连接券商下单。")
         positions_text = st.text_area(
@@ -1090,36 +1993,53 @@ def main() -> None:
             DEFAULT_POSITIONS,
             height=110,
             label_visibility="collapsed",
-            placeholder="示例（可多行）:\n600111 200 51.75\n000758 100 20.30",
+            placeholder="示例（可多行）:\n600000 100 10.00\n000001 100 12.00",
         )
         st.caption("支持空格/逗号/冒号分隔，例如：600111,200,51.75 或 600111:200:51.75")
         pos_count = len(parse_positions(positions_text))
         st.caption(f"已识别 {pos_count} 条持仓")
 
         render_sidebar_card("指标引擎", "已启用 MACD、KDJ、RSI、BOLL、MA5/10/20/60、量能比和技术评分。评分只做观察，不替代纪律线。")
+        render_sidebar_card("外部参考雷达", "可选接入公开市场工作台风格数据：市场状态、主力资金、热点板块和热股排行。慢或不可用时会自动降级。")
+        enable_reference = st.checkbox("启用外部参考源", value=True)
+        load_reference_report = st.checkbox("加载完整热点报告（较慢）", value=False)
+        reference_url = st.text_input("参考源地址", DEFAULT_REFERENCE_URL, label_visibility="collapsed")
 
-        if st.button("刷新行情", width="stretch"):
+        if st.button("刷新行情", use_container_width=True):
             st.cache_data.clear()
 
     codes = set(parse_codes(codes_text))
     positions = parse_positions(positions_text)
     if not positions.empty:
         codes.update(positions["代码"].tolist())
-    for group in SECTORS.values():
-        codes.update(group)
+    if full_scan:
+        for group in SECTORS.values():
+            codes.update(group)
+    else:
+        # Fast mode: keep one representative per sector for rotation context.
+        for group in SECTORS.values():
+            if group:
+                codes.add(group[0])
 
+    reference_bundle = dict(fetch_reference_bundle(reference_url, bool(enable_reference)))
+    if enable_reference and load_reference_report:
+        reference_bundle["report"] = fetch_reference_report_payload(reference_url, True)
     indices = fetch_indices()
+    ref_indices = reference_indices_df(reference_bundle)
+    if indices.empty and not ref_indices.empty:
+        indices = ref_indices
     quotes = get_quotes(tuple(codes))
-    now_dt = dt.datetime.now()
+    now_dt = cn_now()
     now = now_dt.strftime("%Y-%m-%d %H:%M:%S")
     phase = market_phase(now_dt)
+    trade_state = trading_day_status(now_dt)
     temp, temp_note = index_temperature(indices)
 
     st.markdown(
         f"""
         <div class="hero">
-          <div class="hero-title">A股每日动态合集</div>
-          <div class="hero-sub">更新时间：{now}　市场阶段：{phase}　模式：{mode}　以下内容不构成个性化投资建议</div>
+          <div class="hero-title">A股短线王</div>
+          <div class="hero-sub">更新时间（北京时间）：{now}　交易状态：{trade_state}　市场阶段：{phase}　模式：{mode}　以下内容不构成个性化投资建议</div>
           <div class="strip">
             <span class="pill">市场温度：{temp}</span>
             <span class="pill">{temp_note}</span>
@@ -1160,6 +2080,8 @@ def main() -> None:
             ("技术均分", f"{tech_avg:.0f}", f"持仓浮盈亏 {pnl_total:+.2f} 元"),
         ]
     )
+    if enable_reference:
+        render_reference_cockpit(reference_bundle)
 
     left, right = st.columns([1.12, 0.88])
     with left:
@@ -1169,7 +2091,9 @@ def main() -> None:
 
     render_tech_matrix(quotes)
 
-    tab_digest, tab_tech, tab_hold, tab_rotation, tab_watch, tab_text = st.tabs(["盘面总览", "技术指标", "持仓雷达", "风扇蜂巢", "观察池", "文本合集"])
+    tab_digest, tab_external, tab_tech, tab_hold, tab_rotation, tab_watch, tab_quant, tab_backtest, tab_journal, tab_text = st.tabs(
+        ["盘面总览", "外部雷达", "技术指标", "持仓雷达", "风扇蜂巢", "观察池", "量化工具", "回测工具", "交易复盘", "文本合集"]
+    )
 
     with tab_digest:
         st.subheader("主线排序")
@@ -1178,13 +2102,18 @@ def main() -> None:
         else:
             summary = rotation.head(6).copy()
             summary["成交额"] = summary["成交额"].map(cn_money)
-            st.dataframe(summary, width="stretch", hide_index=True)
+            st.dataframe(summary, use_container_width=True, hide_index=True)
         st.subheader("自选强弱分布")
         rank = quotes[["代码", "名称", "最新价", "涨跌幅%", "状态", "一手资金", "成交额", "换手%", "日高", "日低"]].copy()
         rank["成交额"] = rank["成交额"].map(cn_money)
-        st.dataframe(rank.sort_values("涨跌幅%", ascending=False), width="stretch", hide_index=True)
+        st.dataframe(rank.sort_values("涨跌幅%", ascending=False), use_container_width=True, hide_index=True)
+
+    with tab_external:
+        render_reference_tab(reference_bundle)
 
     with tab_tech:
+        render_indicator_guide()
+        st.subheader("技术评分排行")
         tech_cols = [
             "代码",
             "名称",
@@ -1205,7 +2134,14 @@ def main() -> None:
             "MA60",
         ]
         available_cols = [col for col in tech_cols if col in quotes.columns]
-        st.dataframe(quotes[available_cols].sort_values("技术评分", ascending=False), width="stretch", hide_index=True)
+        tech_sorted = quotes[available_cols].sort_values("技术评分", ascending=False)
+        st.dataframe(tech_sorted, use_container_width=True, hide_index=True)
+        st.subheader("量价共振观察")
+        cols_focus = [c for c in ["代码", "名称", "最新价", "涨跌幅%", "量能比", "MACD信号", "KDJ信号", "均线结构", "状态"] if c in quotes.columns]
+        focus = quotes[cols_focus].copy()
+        if "量能比" in focus.columns:
+            focus = focus.sort_values(["量能比", "涨跌幅%"], ascending=[False, False])
+        st.dataframe(focus.head(20), use_container_width=True, hide_index=True)
         st.caption("技术评分用于观察强弱共振，不代表确定性买卖点。MACD/KDJ 金叉需要结合位置、量能和板块主线确认。")
 
     with tab_hold:
@@ -1215,9 +2151,13 @@ def main() -> None:
             hold = owned.copy()
             hold["成本距离%"] = (hold["最新价"] / hold["成本"] - 1) * 100
             hold["日内位置%"] = ((hold["最新价"] - hold["日低"]) / (hold["日高"] - hold["日低"]).replace(0, 0.01) * 100).clip(0, 100)
+            hold["止损线(-3%)"] = hold["成本"] * 0.97
+            hold["止损线(-5%)"] = hold["成本"] * 0.95
+            hold["止盈线1(+6%)"] = hold["成本"] * 1.06
+            hold["止盈线2(+10%)"] = hold["成本"] * 1.10
             st.dataframe(
-                hold[["代码", "名称", "股数", "成本", "最新价", "成本距离%", "浮盈亏", "浮盈亏%", "状态", "均价", "日高", "日低"]],
-                width="stretch",
+                hold[["代码", "名称", "股数", "成本", "最新价", "成本距离%", "浮盈亏", "浮盈亏%", "止损线(-3%)", "止损线(-5%)", "止盈线1(+6%)", "止盈线2(+10%)", "状态", "均价", "日高", "日低"]],
+                use_container_width=True,
                 hide_index=True,
             )
             for _, row in hold.iterrows():
@@ -1227,25 +2167,233 @@ def main() -> None:
         show = rotation.copy()
         if not show.empty:
             show["成交额"] = show["成交额"].map(cn_money)
-            st.dataframe(show, width="stretch", hide_index=True)
+            st.dataframe(show, use_container_width=True, hide_index=True)
             st.bar_chart(rotation.set_index("板块叶片")["风扇分"])
+            st.subheader("风叶雷达")
+            radar = build_fan_radar(rotation)[["板块叶片", "风叶阶段", "状态", "风扇分", "甜点分", "代表股"]].copy()
+            st.dataframe(radar, use_container_width=True, hide_index=True)
+            st.subheader("板块热力")
+            heat = build_fan_radar(rotation)[["板块叶片", "风叶阶段", "风扇分", "甜点分"]].sort_values("风扇分", ascending=False)
+            st.dataframe(heat, use_container_width=True, hide_index=True)
+            st.subheader("轮动时钟")
+            clock = build_rotation_clock(rotation)
+            st.dataframe(clock, use_container_width=True, hide_index=True)
             honey = rotation[["板块叶片", "状态", "风扇分", "代表股"]].copy()
             honey["蜂蜜甜度"] = honey["风扇分"].rank(pct=True) * 100
             honey["资金判断"] = honey["状态"].map({"加速/高潮": "甜但拥挤", "启动": "资金主动流入", "修复/潜伏": "等待确认", "分歧": "换手分歧", "退潮": "资金撤退"}).fillna("观察")
             st.subheader("蜂巢资金迁徙")
-            st.dataframe(honey.sort_values("蜂蜜甜度", ascending=False), width="stretch", hide_index=True)
+            st.dataframe(honey.sort_values("蜂蜜甜度", ascending=False), use_container_width=True, hide_index=True)
 
     with tab_watch:
-        watch = make_watchlist(quotes, int(cash), max_watch_pct)
-        if watch.empty:
-            st.warning("当前没有符合资金和涨幅过滤的观察票。")
+        st.caption("以下是观察池，不构成个性化投资建议。")
+        bottom_watch = make_bottom_watchlist(quotes, int(cash))
+        entry_watch = make_entry_watchlist(quotes, int(cash), max_watch_pct)
+        if bottom_watch.empty and entry_watch.empty:
+            st.warning("当前没有符合资金和过滤条件的观察票。")
         else:
-            watch_show = watch[["代码", "名称", "最新价", "涨跌幅%", "状态", "观察理由", "一手资金", "成交额", "换手%", "日内位置%", "日高", "日低"]].copy()
-            watch_show["成交额"] = watch_show["成交额"].map(cn_money)
-            st.dataframe(watch_show, width="stretch", hide_index=True)
+            st.subheader("低吸观察（抄底观察）")
+            if bottom_watch.empty:
+                st.info("当前暂无合格低吸观察标的。")
+            else:
+                bottom_show = bottom_watch[["代码", "名称", "最新价", "涨跌幅%", "状态", "一手资金", "技术评分", "成交额", "日高", "日低"]].copy()
+                bottom_show["成交额"] = bottom_show["成交额"].map(cn_money)
+                st.dataframe(bottom_show.head(12), use_container_width=True, hide_index=True)
+
+            st.subheader("顺势观察（适合入场观察）")
+            if entry_watch.empty:
+                st.info("当前暂无合格顺势观察标的。")
+            else:
+                entry_show = entry_watch[["代码", "名称", "最新价", "涨跌幅%", "状态", "一手资金", "技术评分", "成交额", "日高", "日低"]].copy()
+                entry_show["成交额"] = entry_show["成交额"].map(cn_money)
+                st.dataframe(entry_show.head(12), use_container_width=True, hide_index=True)
+
+            st.subheader("仓位管理器（按你的资金自动测算）")
+            sizing_base = pd.concat([bottom_watch.head(8), entry_watch.head(8)], ignore_index=True).drop_duplicates("代码")
+            if sizing_base.empty:
+                st.info("暂无可测算标的。")
+            else:
+                plan = build_position_plan(sizing_base, int(total_capital), float(max_single_pct), float(reserve_pct))
+                plan["预算占用"] = plan["预算占用"].map(lambda x: f"{x:.0f}")
+                plan["单票预算"] = plan["单票预算"].map(lambda x: f"{x:.0f}")
+                st.dataframe(plan[["代码", "名称", "最新价", "一手资金", "单票预算", "最多可买手数", "最多可买股数", "预算占用"]], use_container_width=True, hide_index=True)
+
             st.subheader("下一步确认")
-            for _, row in watch.head(5).iterrows():
+            merged_watch = pd.concat([bottom_watch.head(3), entry_watch.head(3)], ignore_index=True).drop_duplicates("代码")
+            for _, row in merged_watch.iterrows():
                 st.markdown(f"- **{row['名称']} {row['代码']}**：看 `{row['日高']:.2f}` 是否突破，看 `{row['日低']:.2f}` 是否失守。")
+
+    with tab_quant:
+        st.caption("以下为量化观察工具，不构成个性化投资建议。")
+        t_panel = build_t_dashboard(owned)
+        st.subheader("做T辅助")
+        if t_panel.empty:
+            st.info("先在左侧输入持仓，系统会自动给出T低吸/高抛观察价。")
+        else:
+            st.dataframe(t_panel, use_container_width=True, hide_index=True)
+            st.caption("做T观察逻辑：靠近低吸观察价看承接，接近高抛观察价看冲高回落风险。")
+
+        st.subheader("主力动向")
+        mf = build_main_force_score(quotes)
+        if mf.empty:
+            st.info("暂无可计算标的。")
+        else:
+            st.dataframe(mf.head(20), use_container_width=True, hide_index=True)
+            st.caption("主力动向分由：站上均价、量能比、MACD/KDJ、当日强弱共同计算。")
+
+    with tab_backtest:
+        st.caption("回测用于验证策略历史表现，不构成个性化投资建议。回测按次日开盘执行信号、A股整手买入，并计入手续费、印花税和滑点。")
+        quote_names = dict(zip(quotes["代码"], quotes["名称"]))
+        default_backtest_codes = sorted(set(quotes["代码"].astype(str).tolist()))
+        if not default_backtest_codes:
+            default_backtest_codes = sorted(codes)
+        with st.form("backtest_form"):
+            source = st.radio("回测范围", ["当前股票池", "当前持仓", "手动输入"], horizontal=True)
+            if source == "当前持仓" and not positions.empty:
+                default_text = " ".join(positions["代码"].astype(str).tolist())
+            elif source == "手动输入":
+                default_text = ""
+            else:
+                default_text = " ".join(default_backtest_codes)
+            backtest_text = st.text_area(
+                "股票代码",
+                value=default_text,
+                height=90,
+                placeholder="示例：600000 000001 601318",
+            )
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                strategy = st.selectbox("策略", ["MA5上穿MA20", "MACD金叉死叉", "KDJ低位金叉", "20日新高突破", "均线+MACD共振"])
+            with c2:
+                limit = st.slider("回测交易日", min_value=80, max_value=720, value=260, step=20)
+            with c3:
+                initial_cash = st.number_input("单票初始资金", min_value=2000, value=10000, step=1000)
+            c4, c5, c6, c7 = st.columns(4)
+            with c4:
+                fee_bps = st.number_input("佣金 万分之", min_value=0.0, value=3.0, step=0.5, format="%.1f")
+            with c5:
+                stamp_tax_pct = st.number_input("卖出印花税%", min_value=0.0, value=0.05, step=0.01, format="%.2f")
+            with c6:
+                slippage_pct = st.number_input("滑点%", min_value=0.0, value=0.10, step=0.05, format="%.2f")
+            with c7:
+                stop_loss_pct = st.number_input("止损%", min_value=1.0, value=6.0, step=0.5, format="%.1f")
+            take_profit_pct = st.slider("止盈触发%", min_value=3.0, max_value=30.0, value=12.0, step=1.0)
+            submitted = st.form_submit_button("开始批量回测", use_container_width=True)
+
+        if submitted:
+            backtest_codes = sorted(set(parse_codes(backtest_text)))
+            if not backtest_codes:
+                st.warning("请输入至少一只 6 位股票代码。")
+            else:
+                progress = st.progress(0.0, text="正在拉取K线并回测...")
+                summaries = []
+                details: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {}
+                for idx, code in enumerate(backtest_codes, 1):
+                    summary, curve, trades = run_single_backtest(
+                        code,
+                        quote_names.get(code, code),
+                        strategy,
+                        int(limit),
+                        float(initial_cash),
+                        float(fee_bps),
+                        float(stamp_tax_pct),
+                        float(slippage_pct),
+                        float(stop_loss_pct),
+                        float(take_profit_pct),
+                    )
+                    summaries.append(summary)
+                    details[code] = (curve, trades)
+                    progress.progress(idx / len(backtest_codes), text=f"已回测 {idx}/{len(backtest_codes)}：{code}")
+                result = pd.DataFrame(summaries)
+                if not result.empty:
+                    result = result.sort_values(["总收益%", "最大回撤%"], ascending=[False, False], na_position="last")
+                st.session_state["backtest_result"] = result
+                st.session_state["backtest_detail"] = details
+                st.session_state["backtest_strategy"] = strategy
+                progress.empty()
+
+        result = st.session_state.get("backtest_result")
+        details = st.session_state.get("backtest_detail", {})
+        if isinstance(result, pd.DataFrame) and not result.empty:
+            st.subheader("回测排名")
+            show = result.copy()
+            for col in ["总收益%", "买入持有%", "超额%", "最大回撤%", "胜率%"]:
+                if col in show.columns:
+                    show[col] = show[col].map(lambda x: "-" if pd.isna(x) else f"{float(x):+.2f}%")
+            st.dataframe(show, use_container_width=True, hide_index=True)
+            valid_codes = [code for code in result["代码"].astype(str).tolist() if code in details]
+            selected = st.selectbox("查看单票细节", valid_codes, format_func=lambda code: f"{quote_names.get(code, code)} {code}")
+            curve, trades = details.get(selected, (pd.DataFrame(), pd.DataFrame()))
+            if isinstance(curve, pd.DataFrame) and not curve.empty:
+                chart = curve.copy()
+                chart["日期"] = pd.to_datetime(chart["日期"])
+                st.line_chart(chart.set_index("日期")[["资产曲线", "买入持有"]])
+            if isinstance(trades, pd.DataFrame) and not trades.empty:
+                trade_show = trades.copy()
+                trade_show["买入价"] = trade_show["买入价"].map(lambda x: f"{float(x):.2f}")
+                trade_show["卖出价"] = trade_show["卖出价"].map(lambda x: f"{float(x):.2f}")
+                trade_show["收益%"] = trade_show["收益%"].map(lambda x: f"{float(x):+.2f}%")
+                st.subheader("交易明细")
+                st.dataframe(trade_show, use_container_width=True, hide_index=True)
+            else:
+                st.info("该策略在这只股票上没有形成完整卖出交易，可能仍处于持仓或信号不足。")
+
+    with tab_journal:
+        st.caption("记录你的交易动作和结果，用于复盘统计。")
+        with st.form("trade_journal_form", clear_on_submit=False):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                trade_date = st.date_input("日期", value=dt.date.today())
+            with c2:
+                trade_code = st.text_input("代码", placeholder="如 600487")
+            with c3:
+                trade_name = st.text_input("名称", placeholder="如 亨通光电")
+            c4, c5, c6, c7 = st.columns(4)
+            with c4:
+                direction = st.selectbox("方向", ["买入", "卖出"])
+            with c5:
+                trade_price = st.number_input("价格", min_value=0.0, value=0.0, step=0.01, format="%.2f")
+            with c6:
+                trade_shares = st.number_input("股数", min_value=0, value=100, step=100)
+            with c7:
+                result_pct = st.number_input("结果%（平仓后填）", value=0.0, step=0.1, format="%.2f")
+            reason = st.text_input("理由", placeholder="如 回踩MA10缩量企稳")
+            note = st.text_input("备注", placeholder="如 失效线跌破执行")
+            submitted = st.form_submit_button("写入日志")
+            if submitted and re.fullmatch(r"\d{6}", (trade_code or "").strip()):
+                append_trade_log(
+                    {
+                        "日期": str(trade_date),
+                        "代码": trade_code.strip(),
+                        "名称": trade_name.strip(),
+                        "方向": direction,
+                        "价格": float(trade_price),
+                        "股数": int(trade_shares),
+                        "理由": reason.strip(),
+                        "结果%": float(result_pct),
+                        "备注": note.strip(),
+                    }
+                )
+                st.success("已写入交易日志。")
+            elif submitted:
+                st.error("代码格式需为 6 位数字。")
+
+        journal = load_trade_log()
+        if journal.empty:
+            st.info("暂无交易日志。")
+        else:
+            st.dataframe(journal.sort_values("日期", ascending=False), use_container_width=True, hide_index=True)
+            valid = pd.to_numeric(journal["结果%"], errors="coerce").dropna()
+            if not valid.empty:
+                win_rate = (valid > 0).mean() * 100
+                avg_win = valid[valid > 0].mean() if (valid > 0).any() else 0.0
+                avg_loss = valid[valid <= 0].mean() if (valid <= 0).any() else 0.0
+                pnl_ratio = (avg_win / abs(avg_loss)) if avg_loss != 0 else 0.0
+                m1, m2, m3 = st.columns(3)
+                m1.metric("已记录样本", f"{len(valid)}")
+                m2.metric("胜率", f"{win_rate:.1f}%")
+                m3.metric("盈亏比", f"{pnl_ratio:.2f}")
+            else:
+                st.caption("结果% 为空时，仅记录行为，不参与胜率统计。")
 
     with tab_text:
         st.text_area("可复制文本", digest_text(indices, quotes, positions, rotation), height=520)

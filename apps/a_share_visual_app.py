@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Streamlit visual app for the Daily A-Share Dynamic Digest skill.
+"""Streamlit visual app for A股短线王.
 
 Run:
     streamlit run apps/a_share_visual_app.py
@@ -347,21 +347,23 @@ def style_money(value: float | int | None) -> str:
 
 
 def main() -> None:
-    st.set_page_config(page_title="每日A股动态合集", page_icon="📈", layout="wide")
-    st.title("每日A股动态合集")
+    st.set_page_config(page_title="A股短线王", page_icon="📈", layout="wide")
+    st.title("A股短线王")
     st.caption("研究观察工具，不构成个性化投资建议。行情源可能延迟或不可用，交易前请以券商和交易所数据为准。")
 
     with st.sidebar:
         st.header("输入")
         codes_text = st.text_area(
             "自选股代码",
-            value="600487 000758 000733 603678 000636 600522 603601 600396 002491",
+            value="",
             height=90,
+            placeholder="示例：600000 000001 601318",
         )
         positions_text = st.text_area(
             "持仓：代码 股数 成本",
-            value="600487 200 68.82\n000758 300 6.893",
+            value="",
             height=90,
+            placeholder="示例：600000 100 10.00",
         )
         cash = st.number_input("可用资金/观察资金", min_value=0, value=10000, step=500)
         scan_pages = st.slider("全市场扫描页数", 1, 20, 8)

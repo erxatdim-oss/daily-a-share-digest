@@ -1,8 +1,8 @@
 interface:
-  display_name: "每日A股动态合集"
-  short_description: "汇总A股行情、板块轮动、风扇/蜂巢模型与风险"
+  display_name: "A股短线王"
+  short_description: "A股行情、板块轮动、主力动向、回测与短线风控"
   brand_color: "#2563EB"
-  default_prompt: "Use $daily-a-share-digest to prepare today's 每日A股动态合集 with market sentiment, fan-blade sector rotation, honeycomb capital migration, risk notes, and optional watchlist."
+  default_prompt: "Use $daily-a-share-digest to prepare today's A股短线王 digest with market sentiment, fan-blade sector rotation, honeycomb capital migration, risk notes, and optional watchlist."
 
 policy:
   allow_implicit_invocation: true

@@ -4,7 +4,7 @@ set -u
 PORT="8503"
 URL="http://localhost:${PORT}"
 APP_DIR="${0:A:h}"
-APP_PY="$APP_DIR/daily_a_share_digest_app.py"
+APP_PY="$APP_DIR/apps/daily_a_share_digest_app.py"
 VENV_DIR="$APP_DIR/.venv"
 LOCAL_STREAMLIT="$VENV_DIR/bin/streamlit"
 PERSONAL_STREAMLIT="$HOME/Quant/qlib_env/bin/streamlit"
